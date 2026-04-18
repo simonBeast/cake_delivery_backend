@@ -6,6 +6,7 @@ const User = require('../models/user.model');
 const ApiError = require('../utils/apiError');
 const catchAsync = require('../utils/catchAsync');
 const { buildPaginationMeta, parsePagination } = require('../utils/pagination');
+const { toPublicImagePath } = require('../middleware/upload.middleware');
 const {
   emitOrderAssigned,
   emitOrderCreated,
@@ -20,6 +21,9 @@ const {
 
 const validStatuses = ['PENDING', 'PREPARING', 'OUT_FOR_DELIVERY', 'DELIVERED', 'DECLINED'];
 const validPaymentMethods = ['CASH', 'SIMULATED_CARD', 'SIMULATED_TRANSFER'];
+const unresolvedPaymentStatuses = ['PENDING', 'PENDING_PROOF', 'SUBMITTED', 'REJECTED'];
+const assignmentBlockThresholdHours = 24;
+const assignmentBlockUnresolvedLimit = 3;
 
 const orderStatusLabelMap = {
   PENDING: 'Pending',
@@ -33,6 +37,58 @@ const paymentMethodLabelMap = {
   CASH: 'cash',
   SIMULATED_CARD: 'card',
   SIMULATED_TRANSFER: 'bank transfer',
+};
+
+const isCashPayment = (method) => method === 'CASH';
+
+const ensurePaymentShape = (order) => {
+  if (!order.payment) {
+    order.payment = {
+      method: 'CASH',
+      status: 'PENDING_PROOF',
+    };
+  }
+
+  if (!Array.isArray(order.payment.auditTrail)) {
+    order.payment.auditTrail = [];
+  }
+
+  if (!order.payment.status) {
+    order.payment.status = 'PENDING_PROOF';
+  }
+
+  if (typeof order.payment.bankName !== 'string') {
+    order.payment.bankName = '';
+  }
+
+  if (typeof order.payment.rejectionReason !== 'string') {
+    order.payment.rejectionReason = '';
+  }
+
+  if (!Number.isFinite(Number(order.payment.proofVersion))) {
+    order.payment.proofVersion = 0;
+  }
+};
+
+const appendPaymentAudit = ({
+  order,
+  action,
+  actorId,
+  note = '',
+  bankName = '',
+  transactionRef = null,
+  proofImage = null,
+}) => {
+  ensurePaymentShape(order);
+  order.payment.auditTrail.push({
+    action,
+    by: actorId || null,
+    at: new Date(),
+    note,
+    bankName,
+    transactionRef,
+    proofImage,
+  });
 };
 
 const getEntityId = (value) => {
@@ -87,11 +143,15 @@ const notifyParticipantsAndAdmins = async ({
   title,
   message,
   type,
+  actorId = null,
   data = {},
 }) => {
+  const excludeRecipientIds = actorId ? [actorId] : [];
+
   await Promise.all([
     createNotifications({
       recipientIds: getParticipantRecipientIds(order),
+      excludeRecipientIds,
       title,
       message,
       type,
@@ -100,6 +160,7 @@ const notifyParticipantsAndAdmins = async ({
     }),
     createNotificationsForRole({
       role: 'ADMIN',
+      excludeRecipientIds,
       title,
       message,
       type,
@@ -255,10 +316,9 @@ const createOrder = catchAsync(async (req, res, next) => {
     scheduledDeliveryTime: scheduledDeliveryTime ? new Date(scheduledDeliveryTime) : null,
     payment: {
       method: paymentMethod,
-      status: paymentMethod === 'CASH' ? 'PENDING' : 'PAID',
-      transactionRef:
-        paymentMethod === 'CASH' ? null : `SIM-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-      paidAt: paymentMethod === 'CASH' ? null : new Date(),
+      status: 'PENDING_PROOF',
+      transactionRef: null,
+      paidAt: null,
     },
   });
 
@@ -272,6 +332,7 @@ const createOrder = catchAsync(async (req, res, next) => {
     const customerName = getEntityName(populated.customer, 'a customer');
     await createNotificationsForRole({
       role: 'ADMIN',
+      excludeRecipientIds: [req.user._id],
       title: 'New order placed',
       message: `Order #${getOrderRef(populated)} was placed by ${customerName}.`,
       type: 'ORDER_CREATED',
@@ -372,6 +433,12 @@ const updateStatus = catchAsync(async (req, res, next) => {
     return next(new ApiError(404, 'Order not found'));
   }
 
+  ensurePaymentShape(order);
+
+  if (status === 'DELIVERED' && !['SUBMITTED', 'PAID'].includes(order.payment.status)) {
+    return next(new ApiError(400, 'Payment proof must be submitted before marking delivered'));
+  }
+
   order.status = status;
   appendStatusHistory(order, status);
 
@@ -392,6 +459,7 @@ const updateStatus = catchAsync(async (req, res, next) => {
       title: 'Order status updated',
       message: `Order #${getOrderRef(order)} is now ${orderStatusLabelMap[order.status] || order.status}.`,
       type: 'ORDER_STATUS_UPDATED',
+      actorId: req.user?._id,
       data: {
         status: order.status,
       },
@@ -450,6 +518,32 @@ const assignDelivery = catchAsync(async (req, res, next) => {
     return next(new ApiError(404, 'Order not found'));
   }
 
+  const existingDeliveryId = getEntityId(order.deliveryPerson);
+  const nextDeliveryId = String(deliveryUser._id);
+  const isNewAssignment = existingDeliveryId !== nextDeliveryId;
+
+  if (isNewAssignment) {
+    const unresolvedThreshold = new Date(
+      Date.now() - assignmentBlockThresholdHours * 60 * 60 * 1000,
+    );
+
+    const unresolvedCount = await Order.countDocuments({
+      deliveryPerson: deliveryUser._id,
+      status: 'DELIVERED',
+      deliveredAt: { $lte: unresolvedThreshold },
+      'payment.status': { $in: unresolvedPaymentStatuses },
+    });
+
+    if (unresolvedCount >= assignmentBlockUnresolvedLimit) {
+      return next(
+        new ApiError(
+          409,
+          `Delivery partner is blocked from new assignments with ${unresolvedCount} unresolved payment proofs older than ${assignmentBlockThresholdHours} hours`,
+        ),
+      );
+    }
+  }
+
   order.deliveryPerson = updates.deliveryPerson;
   order.status = updates.status;
 
@@ -472,6 +566,7 @@ const assignDelivery = catchAsync(async (req, res, next) => {
       title: 'Delivery assigned',
       message: `Order #${getOrderRef(order)} was assigned to ${deliveryName}.`,
       type: 'ORDER_ASSIGNED',
+      actorId: req.user?._id,
       data: {
         status: order.status,
         deliveryPersonId: getEntityId(order.deliveryPerson),
@@ -498,17 +593,17 @@ const markDelivered = catchAsync(async (req, res, next) => {
     return next(new ApiError(403, 'You are not assigned to this order'));
   }
 
+  ensurePaymentShape(order);
+
+  if (!['SUBMITTED', 'PAID'].includes(order.payment.status)) {
+    return next(new ApiError(400, 'Submit payment proof before marking this order as delivered'));
+  }
+
   const paymentStatusBefore = order.payment?.status;
 
   order.status = 'DELIVERED';
   order.deliveredAt = new Date();
   appendStatusHistory(order, 'DELIVERED', order.deliveredAt);
-
-  if (order.payment?.method === 'CASH' && order.payment?.status !== 'PAID') {
-    order.payment.status = 'PAID';
-    order.payment.transactionRef = `CASH-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-    order.payment.paidAt = new Date();
-  }
 
   await order.save();
 
@@ -519,6 +614,7 @@ const markDelivered = catchAsync(async (req, res, next) => {
       title: 'Order delivered',
       message: `Order #${getOrderRef(order)} has been marked as delivered.`,
       type: 'ORDER_DELIVERED',
+      actorId: req.user?._id,
       data: {
         status: order.status,
         deliveredAt: order.deliveredAt,
@@ -536,6 +632,7 @@ const markDelivered = catchAsync(async (req, res, next) => {
         title: 'Payment confirmed',
         message: `Payment confirmed for Order #${getOrderRef(order)} via ${methodLabel}.`,
         type: 'PAYMENT_UPDATED',
+        actorId: req.user?._id,
         data: {
           paymentStatus: order.payment?.status,
           paymentMethod: order.payment?.method,
@@ -560,37 +657,219 @@ const updatePayment = catchAsync(async (req, res, next) => {
     return next(new ApiError(404, 'Order not found'));
   }
 
-  const paymentStatusBefore = order.payment?.status;
-
-  if (method && validPaymentMethods.includes(method)) {
-    order.payment.method = method;
-  }
+  ensurePaymentShape(order);
 
   if (markAsPaid) {
-    order.payment.status = 'PAID';
-    order.payment.transactionRef = `PMT-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-    order.payment.paidAt = new Date();
+    return next(new ApiError(400, 'Use payment review endpoint to approve payment'));
+  }
+
+  if (method && !validPaymentMethods.includes(method)) {
+    return next(new ApiError(400, 'Invalid payment method'));
+  }
+
+  if (method && validPaymentMethods.includes(method) && method !== order.payment.method) {
+    if (order.payment.status === 'PAID') {
+      return next(new ApiError(400, 'Cannot change payment method for a paid order'));
+    }
+
+    order.payment.method = method;
+    order.payment.status = 'PENDING_PROOF';
+    order.payment.bankName = '';
+    order.payment.transactionRef = null;
+    order.payment.proofImage = null;
+    order.payment.proofSubmittedBy = null;
+    order.payment.proofSubmittedAt = null;
+    order.payment.reviewedBy = null;
+    order.payment.reviewedAt = null;
+    order.payment.rejectionReason = '';
+    order.payment.paidAt = null;
+
+    appendPaymentAudit({
+      order,
+      action: 'METHOD_CHANGED',
+      actorId: req.user?._id,
+      note: `Payment method changed to ${method}`,
+    });
   }
 
   await order.save();
 
-  const paymentJustMarkedPaid = paymentStatusBefore !== 'PAID' && order.payment?.status === 'PAID';
-  if (paymentJustMarkedPaid) {
-    emitOrderPaymentUpdated(order);
-    await withNotificationsSafety(async () => {
-      const methodLabel = paymentMethodLabelMap[order.payment?.method] || 'payment';
-      await notifyParticipantsAndAdmins({
-        order,
-        title: 'Payment confirmed',
-        message: `Payment confirmed for Order #${getOrderRef(order)} via ${methodLabel}.`,
-        type: 'PAYMENT_UPDATED',
-        data: {
-          paymentStatus: order.payment?.status,
-          paymentMethod: order.payment?.method,
-        },
-      });
+  return res.json({ success: true, data: order });
+});
+
+const submitPaymentProof = catchAsync(async (req, res, next) => {
+  const { id } = req.params;
+  const { bankName = '', transactionRef = '' } = req.body || {};
+
+  const order = await Order.findById(id)
+    .populate('customer', 'name email role phone')
+    .populate('items.cake')
+    .populate('deliveryPerson', 'name email role phone');
+
+  if (!order) {
+    return next(new ApiError(404, 'Order not found'));
+  }
+
+  if (!order.deliveryPerson || String(order.deliveryPerson._id) !== String(req.user._id)) {
+    return next(new ApiError(403, 'You are not assigned to this order'));
+  }
+
+  if (!['OUT_FOR_DELIVERY', 'DELIVERED'].includes(order.status)) {
+    return next(new ApiError(400, 'Payment proof can be submitted only for active delivery orders'));
+  }
+
+  ensurePaymentShape(order);
+
+  if (order.payment.status === 'PAID') {
+    return next(new ApiError(400, 'Payment is already approved and marked as paid'));
+  }
+
+  const normalizedRef = String(transactionRef).trim();
+  const normalizedBank = String(bankName).trim();
+
+  if (!normalizedRef) {
+    return next(new ApiError(400, 'Transaction or receipt number is required'));
+  }
+
+  if (!isCashPayment(order.payment.method) && !normalizedBank) {
+    return next(new ApiError(400, 'Bank is required for card and transfer payments'));
+  }
+
+  if (!req.file?.path) {
+    return next(new ApiError(400, 'Payment proof image is required'));
+  }
+
+  const normalizedProofImage = toPublicImagePath(req.file.path);
+
+  order.payment.status = 'SUBMITTED';
+  order.payment.bankName = normalizedBank;
+  order.payment.transactionRef = normalizedRef;
+  order.payment.proofImage = normalizedProofImage;
+  order.payment.proofSubmittedBy = req.user._id;
+  order.payment.proofSubmittedAt = new Date();
+  order.payment.reviewedBy = null;
+  order.payment.reviewedAt = null;
+  order.payment.rejectionReason = '';
+  order.payment.paidAt = null;
+  order.payment.proofVersion = Number(order.payment.proofVersion || 0) + 1;
+
+  appendPaymentAudit({
+    order,
+    action: 'PROOF_SUBMITTED',
+    actorId: req.user?._id,
+    bankName: normalizedBank,
+    transactionRef: normalizedRef,
+    proofImage: normalizedProofImage,
+    note: `Proof version ${order.payment.proofVersion}`,
+  });
+
+  await order.save();
+
+  emitOrderPaymentUpdated(order);
+  await withNotificationsSafety(async () => {
+    const deliveryName = getEntityName(order.deliveryPerson, 'delivery partner');
+    await notifyParticipantsAndAdmins({
+      order,
+      title: 'Payment proof submitted',
+      message: `${deliveryName} submitted payment proof for Order #${getOrderRef(order)}.`,
+      type: 'PAYMENT_UPDATED',
+      actorId: req.user?._id,
+      data: {
+        paymentStatus: order.payment?.status,
+        paymentMethod: order.payment?.method,
+      },
+    });
+  });
+
+  return res.json({ success: true, data: order });
+});
+
+const reviewPayment = catchAsync(async (req, res, next) => {
+  const { id } = req.params;
+  const { action, rejectionReason = '' } = req.body || {};
+
+  const order = await Order.findById(id)
+    .populate('customer', 'name email role phone')
+    .populate('items.cake')
+    .populate('deliveryPerson', 'name email role phone');
+
+  if (!order) {
+    return next(new ApiError(404, 'Order not found'));
+  }
+
+  ensurePaymentShape(order);
+
+  if (order.payment.status !== 'SUBMITTED') {
+    return next(new ApiError(400, 'Only submitted payment proofs can be reviewed'));
+  }
+
+  const normalizedReason = String(rejectionReason || '').trim();
+
+  if (action === 'APPROVE') {
+    if (!order.payment.proofImage || !order.payment.transactionRef) {
+      return next(new ApiError(400, 'Payment proof details are incomplete'));
+    }
+
+    order.payment.status = 'PAID';
+    order.payment.paidAt = new Date();
+    order.payment.reviewedBy = req.user._id;
+    order.payment.reviewedAt = new Date();
+    order.payment.rejectionReason = '';
+
+    appendPaymentAudit({
+      order,
+      action: 'PAYMENT_APPROVED',
+      actorId: req.user?._id,
+      bankName: String(order.payment.bankName || '').trim(),
+      transactionRef: order.payment.transactionRef,
+      proofImage: order.payment.proofImage,
     });
   }
+
+  if (action === 'REJECT') {
+    if (!normalizedReason) {
+      return next(new ApiError(400, 'Rejection reason is required'));
+    }
+
+    order.payment.status = 'REJECTED';
+    order.payment.paidAt = null;
+    order.payment.reviewedBy = req.user._id;
+    order.payment.reviewedAt = new Date();
+    order.payment.rejectionReason = normalizedReason;
+
+    appendPaymentAudit({
+      order,
+      action: 'PAYMENT_REJECTED',
+      actorId: req.user?._id,
+      bankName: String(order.payment.bankName || '').trim(),
+      transactionRef: order.payment.transactionRef,
+      proofImage: order.payment.proofImage,
+      note: normalizedReason,
+    });
+  }
+
+  await order.save();
+
+  emitOrderPaymentUpdated(order);
+  await withNotificationsSafety(async () => {
+    const methodLabel = paymentMethodLabelMap[order.payment?.method] || 'payment';
+    const statusMessage =
+      action === 'APPROVE'
+        ? `Payment approved for Order #${getOrderRef(order)} via ${methodLabel}.`
+        : `Payment proof rejected for Order #${getOrderRef(order)}. ${normalizedReason}`;
+
+    await notifyParticipantsAndAdmins({
+      order,
+      title: action === 'APPROVE' ? 'Payment approved' : 'Payment rejected',
+      message: statusMessage,
+      type: 'PAYMENT_UPDATED',
+      actorId: req.user?._id,
+      data: {
+        paymentStatus: order.payment?.status,
+        paymentMethod: order.payment?.method,
+      },
+    });
+  });
 
   return res.json({ success: true, data: order });
 });
@@ -635,6 +914,8 @@ module.exports = {
   assignDelivery,
   getDeliveryOrders,
   markDelivered,
+  submitPaymentProof,
+  reviewPayment,
   updatePayment,
   submitFeedback,
 };

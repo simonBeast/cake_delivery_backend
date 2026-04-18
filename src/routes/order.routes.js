@@ -7,11 +7,14 @@ const {
   getDeliveryOrders,
   getMyOrders,
   markDelivered,
+  reviewPayment,
+  submitPaymentProof,
   submitFeedback,
   updatePayment,
   updateStatus,
 } = require('../controllers/order.controller');
 const authMiddleware = require('../middleware/auth.middleware');
+const { upload } = require('../middleware/upload.middleware');
 const { allowRoles } = require('../middleware/role.middleware');
 const validateRequest = require('../middleware/validateRequest.middleware');
 const {
@@ -19,6 +22,8 @@ const {
   createOrderSchema,
   deliverSchema,
   orderListSchema,
+  reviewPaymentSchema,
+  submitPaymentProofSchema,
   submitFeedbackSchema,
   updatePaymentSchema,
   updateStatusSchema,
@@ -103,9 +108,26 @@ router.patch(
 router.patch(
   '/:id/payment',
   authMiddleware,
-  allowRoles('CUSTOMER', 'ADMIN'),
+  allowRoles('ADMIN'),
   validateRequest(updatePaymentSchema),
   updatePayment,
+);
+
+router.patch(
+  '/:id/payment/proof',
+  authMiddleware,
+  allowRoles('DELIVERY'),
+  upload.single('proofImage'),
+  validateRequest(submitPaymentProofSchema),
+  submitPaymentProof,
+);
+
+router.patch(
+  '/:id/payment/review',
+  authMiddleware,
+  allowRoles('ADMIN'),
+  validateRequest(reviewPaymentSchema),
+  reviewPayment,
 );
 
 router.patch(

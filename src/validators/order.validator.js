@@ -91,6 +91,32 @@ const updatePaymentSchema = Joi.object({
   query: Joi.object().optional(),
 });
 
+const submitPaymentProofSchema = Joi.object({
+  body: Joi.object({
+    bankName: Joi.string().trim().max(120).allow('').optional(),
+    transactionRef: Joi.string().trim().max(120).required(),
+  }).required(),
+  params: Joi.object({
+    id: objectIdSchema.required(),
+  }).required(),
+  query: Joi.object().optional(),
+});
+
+const reviewPaymentSchema = Joi.object({
+  body: Joi.object({
+    action: Joi.string().valid('APPROVE', 'REJECT').required(),
+    rejectionReason: Joi.string().trim().max(300).allow('').when('action', {
+      is: 'REJECT',
+      then: Joi.string().trim().min(3).max(300).required(),
+      otherwise: Joi.optional(),
+    }),
+  }).required(),
+  params: Joi.object({
+    id: objectIdSchema.required(),
+  }).required(),
+  query: Joi.object().optional(),
+});
+
 const submitFeedbackSchema = Joi.object({
   body: Joi.object({
     rating: Joi.number().integer().min(1).max(5).required(),
@@ -109,5 +135,7 @@ module.exports = {
   assignDeliverySchema,
   deliverSchema,
   updatePaymentSchema,
+  submitPaymentProofSchema,
+  reviewPaymentSchema,
   submitFeedbackSchema,
 };

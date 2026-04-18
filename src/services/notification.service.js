@@ -36,15 +36,29 @@ const normalizeRecipientIds = (recipientIds = []) => {
   return Array.from(unique);
 };
 
+const filterExcludedRecipientIds = (recipientIds = [], excludeRecipientIds = []) => {
+  const excluded = new Set(normalizeRecipientIds(excludeRecipientIds));
+
+  if (excluded.size === 0) {
+    return recipientIds;
+  }
+
+  return recipientIds.filter((recipientId) => !excluded.has(recipientId));
+};
+
 const createNotifications = async ({
   recipientIds,
+  excludeRecipientIds = [],
   title,
   message,
   type = 'SYSTEM',
   orderId = null,
   data = {},
 }) => {
-  const normalizedRecipientIds = normalizeRecipientIds(recipientIds);
+  const normalizedRecipientIds = filterExcludedRecipientIds(
+    normalizeRecipientIds(recipientIds),
+    excludeRecipientIds,
+  );
 
   if (normalizedRecipientIds.length === 0) {
     return [];

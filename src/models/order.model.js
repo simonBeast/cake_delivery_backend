@@ -119,13 +119,92 @@ const orderSchema = new mongoose.Schema(
       },
       status: {
         type: String,
-        enum: ['PENDING', 'PAID', 'FAILED', 'REFUNDED'],
-        default: 'PENDING',
+        enum: ['PENDING', 'PENDING_PROOF', 'SUBMITTED', 'PAID', 'REJECTED', 'FAILED', 'REFUNDED'],
+        default: 'PENDING_PROOF',
+      },
+      bankName: {
+        type: String,
+        trim: true,
+        default: '',
+        maxlength: 120,
       },
       transactionRef: {
         type: String,
         default: null,
       },
+      proofImage: {
+        type: String,
+        default: null,
+      },
+      proofSubmittedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        default: null,
+      },
+      proofSubmittedAt: {
+        type: Date,
+        default: null,
+      },
+      reviewedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        default: null,
+      },
+      reviewedAt: {
+        type: Date,
+        default: null,
+      },
+      rejectionReason: {
+        type: String,
+        trim: true,
+        default: '',
+        maxlength: 300,
+      },
+      proofVersion: {
+        type: Number,
+        default: 0,
+        min: 0,
+      },
+      auditTrail: [
+        {
+          _id: false,
+          action: {
+            type: String,
+            enum: ['METHOD_CHANGED', 'PROOF_SUBMITTED', 'PAYMENT_APPROVED', 'PAYMENT_REJECTED'],
+            required: true,
+          },
+          by: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'User',
+            default: null,
+          },
+          at: {
+            type: Date,
+            required: true,
+            default: Date.now,
+          },
+          note: {
+            type: String,
+            trim: true,
+            default: '',
+            maxlength: 300,
+          },
+          bankName: {
+            type: String,
+            trim: true,
+            default: '',
+            maxlength: 120,
+          },
+          transactionRef: {
+            type: String,
+            default: null,
+          },
+          proofImage: {
+            type: String,
+            default: null,
+          },
+        },
+      ],
       paidAt: {
         type: Date,
         default: null,
