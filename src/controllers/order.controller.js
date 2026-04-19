@@ -8,6 +8,10 @@ const catchAsync = require('../utils/catchAsync');
 const { buildPaginationMeta, parsePagination } = require('../utils/pagination');
 const { toPublicImagePath } = require('../middleware/upload.middleware');
 const {
+  isCloudinaryConfigured,
+  uploadImageFromPath,
+} = require('../utils/cloudinary');
+const {
   emitOrderAssigned,
   emitOrderCreated,
   emitOrderDelivered,
@@ -551,7 +555,16 @@ const assignDelivery = catchAsync(async (req, res, next) => {
     order.scheduledDeliveryTime = updates.scheduledDeliveryTime;
   }
 
-  appendStatusHistory(order, updates.status);
+  const assignmentAt = new Date();
+  const hasPreparingHistory = Array.isArray(order.statusHistory)
+    ? order.statusHistory.some((entry) => entry?.status === 'PREPARING')
+    : false;
+
+  if (!hasPreparingHistory) {
+    appendStatusHistory(order, 'PREPARING', assignmentAt);
+  }
+
+  appendStatusHistory(order, updates.status, assignmentAt);
   await order.save();
 
   await order.populate('customer', 'name email role phone');
@@ -739,7 +752,15 @@ const submitPaymentProof = catchAsync(async (req, res, next) => {
     return next(new ApiError(400, 'Payment proof image is required'));
   }
 
-  const normalizedProofImage = toPublicImagePath(req.file.path);
+  const normalizedProofImage = isCloudinaryConfigured()
+    ? await uploadImageFromPath(req.file.path, {
+      folder: 'cake-delivery/payment-proofs',
+    })
+    : toPublicImagePath(req.file.path);
+
+  if (!normalizedProofImage) {
+    return next(new ApiError(500, 'Failed to process payment proof image'));
+  }
 
   order.payment.status = 'SUBMITTED';
   order.payment.bankName = normalizedBank;

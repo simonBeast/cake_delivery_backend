@@ -3,6 +3,10 @@ const ApiError = require('../utils/apiError');
 const catchAsync = require('../utils/catchAsync');
 const { toPublicImagePath } = require('../middleware/upload.middleware');
 const { buildPaginationMeta, parsePagination } = require('../utils/pagination');
+const {
+  isCloudinaryConfigured,
+  uploadImageFromPath,
+} = require('../utils/cloudinary');
 
 const parseBooleanField = (value, defaultValue) => {
   if (value === undefined || value === null || value === '') {
@@ -41,7 +45,7 @@ const parsePrimaryImageIndex = (value) => {
   return parsed;
 };
 
-const normalizeUploadedImages = (req) => {
+const normalizeUploadedImages = async (req) => {
   const files = [];
 
   if (Array.isArray(req.files?.images)) {
@@ -56,8 +60,24 @@ const normalizeUploadedImages = (req) => {
     files.push(req.file);
   }
 
-  return files
-    .map((file) => toPublicImagePath(file.path))
+  const imagePaths = await Promise.all(
+    files.map(async (file) => {
+      if (!file?.path) {
+        return null;
+      }
+
+      if (isCloudinaryConfigured()) {
+        const uploaded = await uploadImageFromPath(file.path, {
+          folder: 'cake-delivery/cakes',
+        });
+        return uploaded;
+      }
+
+      return toPublicImagePath(file.path);
+    }),
+  );
+
+  return imagePaths
     .filter(Boolean)
     .filter((value, index, all) => all.indexOf(value) === index);
 };
@@ -85,7 +105,7 @@ const createCake = catchAsync(async (req, res, next) => {
     return next(new ApiError(400, 'name and price are required'));
   }
 
-  const uploadedImages = normalizeUploadedImages(req);
+  const uploadedImages = await normalizeUploadedImages(req);
   const primaryImageIndex = parsePrimaryImageIndex(req.body?.primaryImageIndex);
   const primaryImage = resolvePrimaryImage(uploadedImages, primaryImageIndex);
 
@@ -160,7 +180,7 @@ const updateCake = catchAsync(async (req, res, next) => {
     return next(new ApiError(404, 'Cake not found'));
   }
 
-  const uploadedImages = normalizeUploadedImages(req);
+  const uploadedImages = await normalizeUploadedImages(req);
   const primaryImageIndex = parsePrimaryImageIndex(req.body?.primaryImageIndex);
   const clearImages = parseBooleanField(req.body?.clearImages, false);
 

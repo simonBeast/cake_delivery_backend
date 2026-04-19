@@ -75,8 +75,12 @@ const sendResetCodeEmail = async ({ to, name, code }) => {
 };
 
 const register = catchAsync(async (req, res, next) => {
-  const { name, email, password, phone } = req.body;
+  const { name, email, password, phone, role } = req.body;
   const normalizedEmail = String(email || '').toLowerCase();
+  const normalizedRole =
+    String(role || 'CUSTOMER').trim().toUpperCase() === 'DELIVERY'
+      ? 'DELIVERY'
+      : 'CUSTOMER';
 
   if (!name || !email || !password || !String(phone || '').trim()) {
     return next(new ApiError(400, 'name, email, password, and phone are required'));
@@ -99,6 +103,7 @@ const register = catchAsync(async (req, res, next) => {
   if (existing && existing.emailVerified === false) {
     existing.name = name;
     existing.phone = String(phone).trim();
+    existing.role = normalizedRole;
     existing.password = password;
     existing.emailVerificationCode = verificationCodeHash;
     existing.emailVerificationExpires = verificationExpires;
@@ -109,7 +114,7 @@ const register = catchAsync(async (req, res, next) => {
       email: normalizedEmail,
       password,
       phone: String(phone).trim(),
-      role: 'CUSTOMER',
+      role: normalizedRole,
       emailVerified: false,
       emailVerificationCode: verificationCodeHash,
       emailVerificationExpires: verificationExpires,

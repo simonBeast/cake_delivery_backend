@@ -1,32 +1,34 @@
 # Cake Delivery Backend
 
-Production-ready Express + MongoDB API for a multi-role cake delivery system.
+Express + MongoDB API for the Cake Delivery platform. The backend powers authentication, order management, cake catalog management, reporting, notifications, uploads, and realtime updates for the mobile app.
 
-It supports:
-- JWT auth with role-based permissions
-- Email verification + password reset via SMTP
-- Cake catalog and image uploads
-- Order lifecycle management
-- Real-time updates (Socket.IO)
-- Notification center
-- Analytics summary for admin dashboard
+## 1. What the Backend Covers
 
-## 1. Stack
+- JWT auth with role-based permissions for CUSTOMER, ADMIN, and DELIVERY users.
+- Email verification and password recovery using SMTP.
+- Cake catalog CRUD with image uploads and availability toggles.
+- Cart-style order creation with scheduled delivery, payment metadata, and feedback.
+- Notification persistence and unread counts.
+- Admin reporting with period filters and delivery performance data.
+- Socket.IO events for live order and notification updates.
 
-- Node.js + Express
+## 2. Stack
+
+- Node.js + Express 
 - MongoDB + Mongoose
 - JWT + bcryptjs
 - Joi validation
 - Multer file uploads
 - Nodemailer SMTP
 - Socket.IO
+- Helmet, CORS, and express-rate-limit for basic hardening
 
-## 2. Quick Start
+## 3. Quick Start
 
 ### Prerequisites
 
 - Node.js 18+
-- MongoDB running locally or in cloud
+- MongoDB available locally or in the cloud
 
 ### Install and run
 
@@ -34,19 +36,19 @@ It supports:
 npm install
 ```
 
-Create `.env` from `.env.example` (Windows PowerShell):
+Create `.env` from `.env.example` in PowerShell:
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-Start in development mode:
+Start the server in development mode:
 
 ```bash
 npm run dev
 ```
 
-Server default URL:
+Default server URL:
 
 ```text
 http://localhost:4000
@@ -58,7 +60,7 @@ Health check:
 GET /health
 ```
 
-## 3. Environment Variables
+## 4. Environment Variables
 
 Required values:
 
@@ -72,27 +74,38 @@ Required values:
 - `SMTP_USER`
 - `SMTP_PASS`
 - `SMTP_FROM`
+- `CLOUDINARY_CLOUD_NAME`
+- `CLOUDINARY_API_KEY`
+- `CLOUDINARY_API_SECRET`
 
 Gmail setup:
 
 - `SMTP_USER`: your Gmail address
-- `SMTP_PASS`: Gmail App Password
+- `SMTP_PASS`: your Gmail App Password
 
-The mailer normalizes app passwords with spaces automatically, so both `abcd efgh ijkl mnop` and `abcdefghijklmnop` work.
+The mailer normalizes spaces in app passwords automatically, so both grouped and ungrouped values work.
 
-## 4. Seeded Demo Data
+Cloudinary setup (recommended for production image persistence):
 
-On startup, the backend seeds demo users and cakes if they do not exist.
+- `CLOUDINARY_CLOUD_NAME`: your Cloudinary cloud name
+- `CLOUDINARY_API_KEY`: Cloudinary API key
+- `CLOUDINARY_API_SECRET`: Cloudinary API secret
 
-Users:
+If Cloudinary variables are configured, cake images and payment proof images are uploaded to Cloudinary and stored as durable HTTPS URLs. If not configured, uploads fallback to local `/uploads` storage.
+
+## 5. Seeded Demo Data
+
+The backend seeds demo users and sample cakes on startup if they do not already exist.
+
+Demo users:
 
 - CUSTOMER: `customer@cake.com` / `password123`
 - ADMIN: `admin@cake.com` / `password123`
 - DELIVERY: `delivery@cake.com` / `password123`
 
-Seed logic is in `src/config/seed.js`.
+Seed logic lives in `src/config/seed.js`.
 
-## 5. API Overview
+## 6. API Overview
 
 All protected endpoints require:
 
@@ -103,16 +116,16 @@ Authorization: Bearer <token>
 ### Auth
 
 - `POST /auth/register`
-	- Creates or updates an unverified account
-	- Sends email verification code
+	- Creates or refreshes an unverified account state
+	- Sends a verification code by email
 - `POST /auth/verify-email`
-	- Verifies code and returns JWT + user
+	- Verifies the code and returns JWT plus user data
 - `POST /auth/login`
-	- Blocks unverified accounts
+	- Rejects unverified accounts
 - `POST /auth/forgot-password`
-	- Sends reset code by email
+	- Sends a reset code by email
 - `POST /auth/reset-password`
-	- Resets password using email + code
+	- Resets the password using email, code, and new password
 
 ### Cakes
 
@@ -121,12 +134,14 @@ Authorization: Bearer <token>
 - `PUT /cakes/:id` (ADMIN)
 - `DELETE /cakes/:id` (ADMIN)
 
-Upload fields supported:
+Supported catalog behaviors include search, filtering, pagination, image uploads, and availability updates.
 
-- `images` (multiple)
-- `image` (legacy single)
+Upload fields:
 
-Static images are served from:
+- `images` for multiple files
+- `image` for the legacy single-image flow
+
+Static uploads are served from:
 
 ```text
 /uploads
@@ -138,11 +153,13 @@ Static images are served from:
 - `GET /orders` (ADMIN)
 - `GET /orders/my` (CUSTOMER)
 - `GET /orders/delivery` (DELIVERY)
-- `PUT/PATCH /orders/:id/status` (ADMIN)
-- `PUT/PATCH /orders/:id/assign` (ADMIN)
+- `PUT /PATCH /orders/:id/status` (ADMIN)
+- `PUT /PATCH /orders/:id/assign` (ADMIN)
 - `PUT /orders/:id/deliver` (DELIVERY)
 - `PATCH /orders/:id/payment` (CUSTOMER, ADMIN)
 - `PATCH /orders/:id/feedback` (CUSTOMER)
+
+Orders now support cart-style item arrays, scheduled delivery time, payment method tracking, and post-delivery feedback.
 
 ### Notifications
 
@@ -155,6 +172,8 @@ Static images are served from:
 
 - `GET /reports/summary` (ADMIN)
 
+The summary endpoint accepts a `period` query parameter with `today`, `week`, `month`, `quarter`, or `year`.
+
 ### Users
 
 - `GET /users/me`
@@ -165,9 +184,9 @@ Static images are served from:
 - `DELETE /users/:id` (ADMIN)
 - `GET /users/delivery` (ADMIN)
 
-## 6. Real-Time Events (Socket.IO)
+## 7. Realtime Events
 
-Client joins rooms with:
+Socket.IO room joins:
 
 - `join:user_room`
 - `join:admin_room`
@@ -185,9 +204,9 @@ Notification event emitted:
 
 - `notification:new`
 
-Implementation is in `src/realtime/socket.js`.
+The realtime wiring is in `src/realtime/socket.js`, and notifications are created through `src/services/notification.service.js`.
 
-## 7. How the Code Is Organized
+## 8. Project Structure
 
 ```text
 src/
@@ -205,6 +224,7 @@ src/
 		error.middleware.js     # centralized error response
 	models/                   # Mongoose schemas
 	routes/                   # route definitions per domain
+	services/                 # domain services such as notifications
 	validators/               # Joi request schemas
 	realtime/
 		socket.js               # socket room/event wiring
@@ -216,22 +236,22 @@ src/
 	uploads/
 ```
 
-## 8. Auth and Email Flow (Detailed)
+## 9. Auth and Email Flow
 
 1. `POST /auth/register`
-2. Backend stores hashed verification code + expiry on user
-3. Backend sends code by SMTP
-4. User submits code to `POST /auth/verify-email`
-5. Backend marks `emailVerified=true` and issues JWT
+2. The backend stores a hashed verification code and expiry on the user record.
+3. A verification email is sent through SMTP.
+4. The client submits the code to `POST /auth/verify-email`.
+5. The backend marks the account verified and issues a JWT.
 
 Password reset follows the same pattern with a reset code and expiry.
 
-## 9. Notes and Troubleshooting
+## 10. Notes and Troubleshooting
 
-- If email is not sending, verify SMTP values and Gmail App Password.
-- Ensure MongoDB URI is reachable from your machine.
-- If uploads fail, confirm request is `multipart/form-data`.
-- If JWT fails, ensure `JWT_SECRET` is set and unchanged between restarts.
+- If email is not sending, verify the SMTP configuration and Gmail App Password.
+- Ensure the MongoDB URI is reachable from your machine.
+- If uploads fail, confirm the request uses `multipart/form-data`.
+- If JWT validation fails, confirm `JWT_SECRET` is set and has not changed between restarts.
 
 ---
 
