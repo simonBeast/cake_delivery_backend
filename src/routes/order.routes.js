@@ -3,6 +3,7 @@ const express = require('express');
 const {
   assignDelivery,
   createOrder,
+  quoteCustomOrder,
   getAllOrders,
   getDeliveryOrders,
   getMyOrders,
@@ -20,8 +21,10 @@ const validateRequest = require('../middleware/validateRequest.middleware');
 const {
   assignDeliverySchema,
   createOrderSchema,
+  createCustomOrderSchema,
   deliverSchema,
   orderListSchema,
+  quoteCustomOrderSchema,
   reviewPaymentSchema,
   submitPaymentProofSchema,
   submitFeedbackSchema,
@@ -36,6 +39,21 @@ router.post(
   authMiddleware,
   allowRoles('CUSTOMER'),
   validateRequest(createOrderSchema),
+  createOrder,
+);
+router.post(
+  '/custom',
+  authMiddleware,
+  allowRoles('CUSTOMER'),
+  upload.array('referenceImages', 5),
+  (req, _res, next) => {
+    req.body = {
+      ...(req.body || {}),
+      orderType: 'CUSTOM',
+    };
+    next();
+  },
+  validateRequest(createCustomOrderSchema),
   createOrder,
 );
 router.get(
@@ -88,6 +106,14 @@ router.patch(
   allowRoles('ADMIN'),
   validateRequest(assignDeliverySchema),
   assignDelivery,
+);
+
+router.patch(
+  '/:id/custom/quote',
+  authMiddleware,
+  allowRoles('ADMIN'),
+  validateRequest(quoteCustomOrderSchema),
+  quoteCustomOrder,
 );
 
 router.put(

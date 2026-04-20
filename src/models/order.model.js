@@ -5,7 +5,7 @@ const orderItemSchema = new mongoose.Schema(
     cake: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Cake',
-      required: true,
+      default: null,
     },
     cakeName: {
       type: String,
@@ -20,8 +20,8 @@ const orderItemSchema = new mongoose.Schema(
     },
     size: {
       type: String,
-      enum: ['SMALL', 'MEDIUM', 'LARGE', 'CUSTOM'],
-      default: 'MEDIUM',
+      enum: ['1KG', '2KG', '3KG', '4KG', 'SMALL', 'MEDIUM', 'LARGE', 'CUSTOM'],
+      default: '2KG',
     },
     flavour: {
       type: String,
@@ -41,12 +41,48 @@ const orderItemSchema = new mongoose.Schema(
 
 const orderSchema = new mongoose.Schema(
   {
+    orderType: {
+      type: String,
+      enum: ['PREDEFINED', 'CUSTOM'],
+      default: 'PREDEFINED',
+    },
     customer: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
       required: true,
     },
     items: [orderItemSchema],
+    customRequest: {
+      description: {
+        type: String,
+        trim: true,
+        default: '',
+        maxlength: 1500,
+      },
+      budgetMin: {
+        type: Number,
+        default: null,
+        min: 0,
+      },
+      budgetMax: {
+        type: Number,
+        default: null,
+        min: 0,
+      },
+      referenceImages: {
+        type: [String],
+        default: [],
+      },
+      quotedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        default: null,
+      },
+      quotedAt: {
+        type: Date,
+        default: null,
+      },
+    },
     totalPrice: {
       type: Number,
       required: true,

@@ -24,10 +24,19 @@ const {
 } = require('../services/notification.service');
 
 const validStatuses = ['PENDING', 'PREPARING', 'OUT_FOR_DELIVERY', 'DELIVERED', 'DECLINED'];
+const validOrderTypes = ['PREDEFINED', 'CUSTOM'];
 const validPaymentMethods = ['CASH', 'SIMULATED_CARD', 'SIMULATED_TRANSFER'];
 const unresolvedPaymentStatuses = ['PENDING', 'PENDING_PROOF', 'SUBMITTED', 'REJECTED'];
+const quoteLockStatuses = ['OUT_FOR_DELIVERY', 'DELIVERED', 'DECLINED'];
 const assignmentBlockThresholdHours = 24;
 const assignmentBlockUnresolvedLimit = 3;
+const canonicalOrderItemSizes = ['1KG', '2KG', '3KG', '4KG'];
+const legacyOrderSizeToKgMap = {
+  SMALL: '1KG',
+  MEDIUM: '2KG',
+  LARGE: '3KG',
+  CUSTOM: '4KG',
+};
 
 const orderStatusLabelMap = {
   PENDING: 'Pending',
@@ -189,11 +198,15 @@ const appendStatusHistory = (order, nextStatus, at = new Date()) => {
   }
 };
 
-const buildOrderQuery = ({ status, from, to }) => {
+const buildOrderQuery = ({ status, from, to, orderType }) => {
   const query = {};
 
   if (status) {
     query.status = status;
+  }
+
+  if (orderType && validOrderTypes.includes(String(orderType).toUpperCase())) {
+    query.orderType = String(orderType).toUpperCase();
   }
 
   if (from || to) {
@@ -209,12 +222,48 @@ const buildOrderQuery = ({ status, from, to }) => {
   return query;
 };
 
+const normalizeReferenceImagesFromFiles = async (files = []) => {
+  if (!Array.isArray(files) || files.length === 0) {
+    return [];
+  }
+
+  const uploaded = await Promise.all(
+    files
+      .filter((file) => Boolean(file?.path))
+      .map(async (file) => {
+        const normalizedPath = isCloudinaryConfigured()
+          ? await uploadImageFromPath(file.path, {
+            folder: 'cake-delivery/custom-orders',
+          })
+          : toPublicImagePath(file.path);
+
+        return normalizedPath || null;
+      }),
+  );
+
+  return uploaded.filter(Boolean);
+};
+
+const normalizeOrderItemSize = (value) => {
+  const normalized = String(value || '').trim().toUpperCase();
+
+  if (canonicalOrderItemSizes.includes(normalized)) {
+    return normalized;
+  }
+
+  if (legacyOrderSizeToKgMap[normalized]) {
+    return legacyOrderSizeToKgMap[normalized];
+  }
+
+  return '2KG';
+};
+
 const normalizeItemsFromRequest = (body = {}) => {
   if (Array.isArray(body.items) && body.items.length > 0) {
     return body.items.map((item) => ({
       cake: item.cake,
       quantity: Number(item.quantity),
-      size: item.size || 'MEDIUM',
+      size: normalizeOrderItemSize(item.size),
       flavour: item.flavour || '',
       designNotes: item.designNotes || '',
     }));
@@ -225,7 +274,7 @@ const normalizeItemsFromRequest = (body = {}) => {
       {
         cake: body.cakeId,
         quantity: Number(body.quantity || 1),
-        size: body.size || 'MEDIUM',
+        size: normalizeOrderItemSize(body.size),
         flavour: body.flavour || '',
         designNotes: body.designNotes || '',
       },
@@ -236,11 +285,24 @@ const normalizeItemsFromRequest = (body = {}) => {
 };
 
 const normalizeDeliveryLocation = (value) => {
-  if (!value || typeof value !== 'object') {
+  if (!value) {
     return null;
   }
 
-  const raw = value;
+  let raw = value;
+
+  if (typeof value === 'string') {
+    try {
+      raw = JSON.parse(value);
+    } catch {
+      throw new ApiError(400, 'deliveryLocation must be a valid object or JSON payload');
+    }
+  }
+
+  if (!raw || typeof raw !== 'object') {
+    return null;
+  }
+
   const lat = Number(raw.lat);
   const lng = Number(raw.lng);
 
@@ -263,14 +325,101 @@ const normalizeDeliveryLocation = (value) => {
 const createOrder = catchAsync(async (req, res, next) => {
   const payload = req.body || {};
   const { scheduledDeliveryTime = null, paymentMethod = 'CASH' } = payload;
+  const orderType = String(payload.orderType || 'PREDEFINED').toUpperCase();
   const items = normalizeItemsFromRequest(payload);
   const deliveryLocation = normalizeDeliveryLocation(payload.deliveryLocation);
   const deliveryAddress = String(
     payload.deliveryAddress || deliveryLocation?.label || '',
   ).trim();
 
+  if (!validOrderTypes.includes(orderType)) {
+    return next(new ApiError(400, 'Invalid order type'));
+  }
+
   if (!validPaymentMethods.includes(paymentMethod)) {
     return next(new ApiError(400, 'Invalid payment method'));
+  }
+
+  if (orderType === 'CUSTOM') {
+    const description = String(payload.description || '').trim();
+    const normalizedBudgetMin = payload.budgetMin === undefined || payload.budgetMin === ''
+      ? null
+      : Number(payload.budgetMin);
+    const normalizedBudgetMax = payload.budgetMax === undefined || payload.budgetMax === ''
+      ? null
+      : Number(payload.budgetMax);
+    const referenceImages = await normalizeReferenceImagesFromFiles(req.files || []);
+
+    if (description.length < 8) {
+      return next(new ApiError(400, 'Custom order description must be at least 8 characters'));
+    }
+
+    if (referenceImages.length === 0) {
+      return next(new ApiError(400, 'At least one reference image is required for custom order'));
+    }
+
+    if (normalizedBudgetMin !== null && (!Number.isFinite(normalizedBudgetMin) || normalizedBudgetMin < 0)) {
+      return next(new ApiError(400, 'budgetMin must be a valid non-negative number'));
+    }
+
+    if (normalizedBudgetMax !== null && (!Number.isFinite(normalizedBudgetMax) || normalizedBudgetMax < 0)) {
+      return next(new ApiError(400, 'budgetMax must be a valid non-negative number'));
+    }
+
+    if (
+      normalizedBudgetMin !== null
+      && normalizedBudgetMax !== null
+      && normalizedBudgetMax < normalizedBudgetMin
+    ) {
+      return next(new ApiError(400, 'budgetMax must be greater than or equal to budgetMin'));
+    }
+
+    const order = await Order.create({
+      orderType: 'CUSTOM',
+      customer: req.user._id,
+      items: [],
+      customRequest: {
+        description,
+        budgetMin: normalizedBudgetMin,
+        budgetMax: normalizedBudgetMax,
+        referenceImages,
+      },
+      totalPrice: 0,
+      statusHistory: [{ status: 'PENDING', at: new Date() }],
+      deliveryAddress,
+      deliveryLocation,
+      scheduledDeliveryTime: scheduledDeliveryTime ? new Date(scheduledDeliveryTime) : null,
+      payment: {
+        method: paymentMethod,
+        status: 'PENDING_PROOF',
+        transactionRef: null,
+        paidAt: null,
+      },
+    });
+
+    const populatedCustom = await Order.findById(order._id)
+      .populate('customer', 'name email role phone')
+      .populate('items.cake')
+      .populate('deliveryPerson', 'name email role phone');
+
+    emitOrderCreated(populatedCustom);
+    await withNotificationsSafety(async () => {
+      const customerName = getEntityName(populatedCustom.customer, 'a customer');
+      await createNotificationsForRole({
+        role: 'ADMIN',
+        excludeRecipientIds: [req.user._id],
+        title: 'New custom order request',
+        message: `Custom order #${getOrderRef(populatedCustom)} was requested by ${customerName}.`,
+        type: 'ORDER_CREATED',
+        orderId: populatedCustom._id,
+        data: {
+          status: populatedCustom.status,
+          orderType: populatedCustom.orderType,
+        },
+      });
+    });
+
+    return res.status(201).json({ success: true, data: populatedCustom });
   }
 
   if (items.length === 0) {
@@ -311,6 +460,7 @@ const createOrder = catchAsync(async (req, res, next) => {
   }, 0);
 
   const order = await Order.create({
+    orderType: 'PREDEFINED',
     customer: req.user._id,
     items: orderItems,
     totalPrice,
@@ -437,6 +587,10 @@ const updateStatus = catchAsync(async (req, res, next) => {
     return next(new ApiError(404, 'Order not found'));
   }
 
+  if (order.orderType === 'CUSTOM' && Number(order.totalPrice || 0) <= 0) {
+    return next(new ApiError(400, 'Set a quote price before assigning this custom order'));
+  }
+
   ensurePaymentShape(order);
 
   if (status === 'DELIVERED' && !['SUBMITTED', 'PAID'].includes(order.payment.status)) {
@@ -466,6 +620,63 @@ const updateStatus = catchAsync(async (req, res, next) => {
       actorId: req.user?._id,
       data: {
         status: order.status,
+      },
+    });
+  });
+
+  return res.json({ success: true, data: order });
+});
+
+const quoteCustomOrder = catchAsync(async (req, res, next) => {
+  const { id } = req.params;
+  const quotedPrice = Number(req.body?.totalPrice);
+
+  if (!Number.isFinite(quotedPrice) || quotedPrice <= 0) {
+    return next(new ApiError(400, 'Quoted price must be a positive number'));
+  }
+
+  const order = await Order.findById(id)
+    .populate('customer', 'name email role phone')
+    .populate('items.cake')
+    .populate('deliveryPerson', 'name email role phone');
+
+  if (!order) {
+    return next(new ApiError(404, 'Order not found'));
+  }
+
+  if (order.orderType !== 'CUSTOM') {
+    return next(new ApiError(400, 'Quote update is allowed only for custom orders'));
+  }
+
+  if (order.deliveryPerson || quoteLockStatuses.includes(order.status)) {
+    return next(new ApiError(400, 'Quote is locked after delivery assignment'));
+  }
+
+  order.totalPrice = quotedPrice;
+  if (!order.customRequest || typeof order.customRequest !== 'object') {
+    order.customRequest = {
+      description: '',
+      budgetMin: null,
+      budgetMax: null,
+      referenceImages: [],
+    };
+  }
+  order.customRequest.quotedBy = req.user?._id || null;
+  order.customRequest.quotedAt = new Date();
+
+  await order.save();
+
+  await withNotificationsSafety(async () => {
+    await notifyParticipantsAndAdmins({
+      order,
+      title: 'Custom order quoted',
+      message: `Custom order #${getOrderRef(order)} was quoted at ${quotedPrice}.`,
+      type: 'ORDER_STATUS_UPDATED',
+      actorId: req.user?._id,
+      data: {
+        status: order.status,
+        orderType: order.orderType,
+        totalPrice: order.totalPrice,
       },
     });
   });
@@ -933,6 +1144,7 @@ module.exports = {
   getMyOrders,
   updateStatus,
   assignDelivery,
+  quoteCustomOrder,
   getDeliveryOrders,
   markDelivered,
   submitPaymentProof,

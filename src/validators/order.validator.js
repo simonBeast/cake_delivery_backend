@@ -2,10 +2,28 @@ const Joi = require('joi');
 
 const objectIdSchema = Joi.string().hex().length(24);
 
+const deliveryLocationSchema = Joi.object({
+  lat: Joi.number().required(),
+  lng: Joi.number().required(),
+  label: Joi.string().trim().allow('').max(220).optional(),
+  placeId: Joi.string().trim().allow('').max(200).optional(),
+});
+
+const allowedOrderSizes = [
+  '1KG',
+  '2KG',
+  '3KG',
+  '4KG',
+  'SMALL',
+  'MEDIUM',
+  'LARGE',
+  'CUSTOM',
+];
+
 const itemSchema = Joi.object({
   cake: objectIdSchema.required(),
   quantity: Joi.number().integer().greater(0).required(),
-  size: Joi.string().valid('SMALL', 'MEDIUM', 'LARGE', 'CUSTOM').optional(),
+  size: Joi.string().valid(...allowedOrderSizes).optional(),
   flavour: Joi.string().trim().max(120).allow('').optional(),
   designNotes: Joi.string().trim().max(400).allow('').optional(),
 });
@@ -14,6 +32,7 @@ const createOrderSchema = Joi.object({
   body: Joi.object({
     cakeId: objectIdSchema.optional(),
     quantity: Joi.number().integer().greater(0).optional(),
+    size: Joi.string().valid(...allowedOrderSizes).optional(),
     items: Joi.array().items(itemSchema).min(1).optional(),
     deliveryAddress: Joi.string().trim().allow('').max(300).optional(),
     scheduledDeliveryTime: Joi.date().iso().optional(),
@@ -27,12 +46,43 @@ const createOrderSchema = Joi.object({
   query: Joi.object().optional(),
 });
 
+const createCustomOrderSchema = Joi.object({
+  body: Joi.object({
+    description: Joi.string().trim().min(8).max(1500).required(),
+    budgetMin: Joi.number().min(0).optional(),
+    budgetMax: Joi.number().min(0).optional(),
+    deliveryAddress: Joi.string().trim().allow('').max(300).optional(),
+    deliveryLocation: Joi.alternatives().try(deliveryLocationSchema, Joi.string().trim()).optional(),
+    scheduledDeliveryTime: Joi.date().iso().optional(),
+    paymentMethod: Joi.string()
+      .valid('CASH', 'SIMULATED_CARD', 'SIMULATED_TRANSFER')
+      .optional(),
+  })
+    .custom((value, helpers) => {
+      const hasMin = Number.isFinite(Number(value.budgetMin));
+      const hasMax = Number.isFinite(Number(value.budgetMax));
+
+      if (hasMin && hasMax && Number(value.budgetMax) < Number(value.budgetMin)) {
+        return helpers.error('any.invalid');
+      }
+
+      return value;
+    }, 'budget range validation')
+    .messages({
+      'any.invalid': 'budgetMax must be greater than or equal to budgetMin',
+    })
+    .required(),
+  params: Joi.object().optional(),
+  query: Joi.object().optional(),
+});
+
 const orderListSchema = Joi.object({
   body: Joi.object().optional(),
   params: Joi.object().optional(),
   query: Joi.object({
     page: Joi.number().integer().min(1).optional(),
     limit: Joi.number().integer().min(1).max(100).optional(),
+    orderType: Joi.string().valid('PREDEFINED', 'CUSTOM').optional(),
     status: Joi.string()
       .valid('PENDING', 'PREPARING', 'OUT_FOR_DELIVERY', 'DELIVERED', 'DECLINED')
       .optional(),
@@ -117,6 +167,16 @@ const reviewPaymentSchema = Joi.object({
   query: Joi.object().optional(),
 });
 
+const quoteCustomOrderSchema = Joi.object({
+  body: Joi.object({
+    totalPrice: Joi.number().positive().required(),
+  }).required(),
+  params: Joi.object({
+    id: objectIdSchema.required(),
+  }).required(),
+  query: Joi.object().optional(),
+});
+
 const submitFeedbackSchema = Joi.object({
   body: Joi.object({
     rating: Joi.number().integer().min(1).max(5).required(),
@@ -130,6 +190,7 @@ const submitFeedbackSchema = Joi.object({
 
 module.exports = {
   createOrderSchema,
+  createCustomOrderSchema,
   orderListSchema,
   updateStatusSchema,
   assignDeliverySchema,
@@ -137,5 +198,6 @@ module.exports = {
   updatePaymentSchema,
   submitPaymentProofSchema,
   reviewPaymentSchema,
+  quoteCustomOrderSchema,
   submitFeedbackSchema,
 };
