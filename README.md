@@ -8,6 +8,9 @@ Express + MongoDB API for the Cake Delivery platform. The backend powers authent
 - Email verification and password recovery using SMTP.
 - Cake catalog CRUD with image uploads and availability toggles.
 - Cart-style order creation with scheduled delivery, payment metadata, and feedback.
+- Delivery-side payment proof submission with image evidence.
+- Admin payment review queue with explicit approve and reject actions.
+- Payment audit trail with proof versioning and rejection reasons.
 - Notification persistence and unread counts.
 - Admin reporting with period filters and delivery performance data.
 - Socket.IO events for live order and notification updates.
@@ -156,10 +159,28 @@ Static uploads are served from:
 - `PUT /PATCH /orders/:id/status` (ADMIN)
 - `PUT /PATCH /orders/:id/assign` (ADMIN)
 - `PUT /orders/:id/deliver` (DELIVERY)
-- `PATCH /orders/:id/payment` (CUSTOMER, ADMIN)
+- `PATCH /orders/:id/delivered` (DELIVERY alias)
+- `PATCH /orders/:id/payment` (ADMIN)
+- `PATCH /orders/:id/payment/proof` (DELIVERY, multipart form with `proofImage`)
+- `PATCH /orders/:id/payment/review` (ADMIN, `APPROVE` or `REJECT`)
 - `PATCH /orders/:id/feedback` (CUSTOMER)
 
 Orders now support cart-style item arrays, scheduled delivery time, payment method tracking, and post-delivery feedback.
+
+Payment workflow details:
+
+- Initial payment status is `PENDING_PROOF` when an order is created.
+- Delivery user submits payment proof with transaction reference and image, moving status to `SUBMITTED`.
+- Admin reviews submitted proof:
+	- `APPROVE` -> payment status becomes `PAID`
+	- `REJECT` -> payment status becomes `REJECTED` and stores a rejection reason
+- Rejected proofs can be re-submitted by delivery users with incremented proof version.
+- Orders cannot be marked delivered until payment status is `SUBMITTED` or `PAID`.
+- Payment method changes are tracked in payment audit history and reset pending proof fields.
+
+Delivery assignment safeguard:
+
+- A delivery user can be blocked from new assignments if they have too many unresolved payment proofs older than 24 hours.
 
 ### Notifications
 
