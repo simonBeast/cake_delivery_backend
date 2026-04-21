@@ -20,7 +20,7 @@ process.on('unhandledRejection', (reason) => {
 
 const startServer = async () => {
   await connectDB();
-  await seedDemoData();
+  // await seedDemoData();
 
   const server = http.createServer(app);
   initSocket(server);
